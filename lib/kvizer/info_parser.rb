@@ -1,19 +1,20 @@
+require 'nokogiri'
+
 class Kvizer
   class InfoParser < Abstract
+
     attr_reader :raw_attributes, :attributes
 
     def initialize(kvizer)
       super kvizer
+      @libvirt = kvizer.libvirt
       reload
     end
 
     def reload
-      input = host.shell!("VBoxManage list vms -l").out
-
-      splitter       = 'Name:            '
-      system_strings = input.split(/^#{splitter}/)[1..-1].map { |str| splitter + str }
-
-      reload_raw_attributes system_strings
+      domains = @libvirt.list_defined_domains.map { |name| @libvirt.lookup_domain_by_name(name) }
+      domains += @libvirt.list_domains.map { |id| @libvirt.lookup_domain_by_id(id) }
+      reload_raw_attributes domains
       reload_attributes
 
       #kvizer.logger.debug "Attributes:\n" + attributes.pretty_inspect
@@ -30,7 +31,8 @@ class Kvizer
       delimiter = columns.map { |c| '-'*c.abs }.join('  ') + "\n"
       head      = %w(name ip status os)
       data      = attributes.values.map do |attr|
-        { :name => attr[:name], :ip => attr[:ip], :status => kvizer.vm(attr[:name]).status, :guest_os => attr[:guest_os] }
+        { :name => attr[:name], :ip => attr[:ip], :status => kvizer.vm(attr[:name]).status,
+          :guest_os => attr[:guest_os] }
       end
       delimiter + format % head + delimiter + data.sort do |a, b|
         [a[:status].to_s, a[:name].to_s] <=> [b[:status].to_s, b[:name].to_s]
@@ -39,38 +41,33 @@ class Kvizer
       end.join + delimiter
     end
 
-    def reload_raw_attributes(system_strings)
-      @raw_attributes = system_strings.map do |system_string|
-        attribute_string = system_string.split(/\n\n/, 2).first
-        attribute_string.each_line.inject({}) do |hash, line|
-          line =~ /^([^:]+):\s+(.+)$/
-          k, v    = $1, $2
-          hash[k] = parse_nic k, v
-          hash
-        end
-      end.inject({}) do |hash, attributes|
-        hash[attributes['Name']] = attributes
-        hash
+    def reload_raw_attributes(domains)
+      domains.map! do |domain|
+        xml = Nokogiri.XML(domain.xml_desc)
+        [xml.search('name').text, xml]
       end
+
+      @raw_attributes = Hash[domains]
     end
 
     def reload_attributes
       mac_ip_map = get_mac_ip_map
 
+      # TODO! refactor .search().text to helper
       @attributes = raw_attributes.values.inject({}) do |hash, raw_attributes|
-        name       = raw_attributes['Name']
-        guest_os   = raw_attributes['Guest OS']
-        hash[name] = { :name     => name,
+        name     = raw_attributes.search('name').text
+        # TODO maybe use libvirt metadata?
+        # http://libvirt.org/formatdomain.html#elementsMetadata
+        guest_os = raw_attributes.search('description').text
+        # as long as we have only one network this will find mac
+        mac_attr = raw_attributes.search('interface[type="network"]/mac')
+        mac = !mac_attr.first.nil? ? mac_attr.first['address'] : 'N/A'
+            hash[name] = { :name     => name,
                        :guest_os => guest_os,
-                       :mac      => mac = find_mac(raw_attributes, config.hostonly.name),
+                       :mac      => mac,
                        :ip       => mac_ip_map[mac] }
         hash
       end
-    end
-
-    def find_mac(raw_attributes, net)
-      interface = raw_attributes.find { |k, v| k =~ /NIC \d$/ && v['Attachment'] =~ /#{net}/ }
-      normalize_mac interface.last['MAC'] if interface
     end
 
     def get_mac_ip_map

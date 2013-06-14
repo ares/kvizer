@@ -3,6 +3,16 @@ require 'timeout'
 
 class Kvizer
   class VM < Abstract
+    STATUSES = {
+        Libvirt::Domain::NOSTATE  => 'no state',
+        Libvirt::Domain::RUNNING  => 'running',
+        Libvirt::Domain::BLOCKED  => 'blocked',
+        Libvirt::Domain::PAUSED   => 'paused',
+        Libvirt::Domain::SHUTDOWN => 'shutdown',
+        Libvirt::Domain::SHUTOFF  => 'shutoff',
+        Libvirt::Domain::CRASHED  => 'crashed'
+    }
+
     class LinePrinter
       def initialize(&printer)
         @printer = printer
@@ -136,8 +146,7 @@ class Kvizer
     end
 
     def clone_vm(name, snapshot)
-      host.shell! "VBoxManage clonevm \"#{self.name}\" --snapshot \"#{snapshot}\" --mode machine " +
-                      "--options link --name \"#{name}\" --register"
+      host.shell! "virt-clone --connect=qemu:///system --original=\"#{self.name}\" --name=\"#{name}\" --auto-clone"
       kvizer.info.reload
       kvizer.vms(true)
       cloned_vm = kvizer.vm name
@@ -146,7 +155,7 @@ class Kvizer
 
     def delete
       power_off! if running?
-      host.shell! "VBoxManage unregistervm \"#{name}\" --delete"
+      libvirt_domain.undefine
       kvizer.info.reload
       kvizer.vms(true)
     end
@@ -169,8 +178,7 @@ class Kvizer
     end
 
     def status
-      result     = host.shell!('VBoxManage list runningvms').out
-      box_status = !!(result =~ /"#{name}"/)
+      box_status = status_code == Libvirt::Domain::RUNNING
       if ip
         ping_status = host.shell("ping -c 1 -W 5 #{ip}").success
         ssh_status  = status_of_ssh
@@ -192,33 +200,48 @@ class Kvizer
       end
     end
 
+    # returns libvirt domain object for this vm
+    def libvirt_domain
+      @libvirt_domain ||= kvizer.libvirt.lookup_domain_by_name(name)
+    end
+
+    def status_code
+      libvirt_domain.state.first
+    end
+
     # TODO add class for snapshot
     def snapshots
-      out = host.shell!("VBoxManage snapshot \"#{name}\" list").out
-      out.each_line.map do |line|
-        line =~ /Name: ([^(]+) \(/
-        $1
-      end
+      libvirt_domain.list_snapshots
+    end
+
+    def current_snapshot_name
+      return nil if current_snapshot.nil?
+      current_snapshot.search('domainsnapshot/name').first.try(:text)
+    end
+
+    def current_snapshot_parent_name
+      return nil if current_snapshot.nil?
+      current_snapshot.search('domainsnapshot/parent/name').first.try(:text)
+    end
+
+    def current_snapshot
+      Nokogiri.XML(libvirt_domain.current_snapshot.try(:xml_desc))
+    rescue Libvirt::RetrieveError
+      nil
     end
 
     def take_snapshot(snapshot_name)
       stop_and_wait
-      cmd    = "VBoxManage snapshot \"#{name}\" take \"#{snapshot_name}\""
-      result = host.shell cmd
-      if result.success
-        return
-      else
-        sleep 1
-        host.shell! cmd
-      end
-      sleep 5 # other commands fail after this when called immidietly
+      parent_name = current_snapshot_name
+      libvirt_domain.snapshot_create_xml("<domainsnapshot><name>#{snapshot_name}</name><parent>#{parent_name}</parent></domainsnapshot>",
+                                         16)
     end
 
     def restore_snapshot(snapshot_name)
-      raise ArgumentError, "No snapshot named #{snapshot_name}" unless snapshots.include? snapshot_name
-      power_off! if running?
+      raise ArgumentError, "No snapshot named #{snapshot_name}" unless snapshots.include?(snapshot_name)
+      #power_off! if running? # I think it's not needed??
       # restore state form previous job
-      host.shell! "VBoxManage snapshot \"#{name}\" restore \"#{snapshot_name}\""
+      libvirt_domain.revert_to_snapshot(libvirt_domain.lookup_snapshot_by_name(snapshot_name))
       # delete child snapshots
       snapshots.reverse.each do |snapshot|
         break if snapshot == snapshot_name
@@ -231,12 +254,11 @@ class Kvizer
     end
 
     def delete_snapshot(snapshot_name)
-      sleep 1
-      host.shell! "VBoxManage snapshot \"#{name}\" delete \"#{snapshot_name}\""
+      libvirt_domain.lookup_snapshot_by_name(snapshot_name).delete
     end
 
-    def run_and_wait(headless = config.headless)
-      run headless
+    def run_and_wait
+      run
       wait_for :running
       set_hostname
       sleep 5 # give the machine time to start fully
@@ -249,7 +271,7 @@ class Kvizer
 
     def power_off!
       ssh_close
-      host.shell! "VBoxManage controlvm \"#{name}\" poweroff"
+      libvirt_domain.destroy
       sleep 1
     end
 
@@ -271,45 +293,46 @@ class Kvizer
       "#<Kvizer::VM #{name} ip:#{ip.inspect} mac:#{mac.inspect}>"
     end
 
-    def setup_private_network
-      raise if running?
-      unless mac
-        logger.info "Setting up network"
-        host.shell! "VBoxManage modifyvm \"#{name}\" --nic2 hostonly --hostonlyadapter2 #{config.hostonly.name}"
-        kvizer.info.reload
-      else
-        true
-      end
-    end
+    #def setup_private_network
+    #  raise if running?
+    #  unless mac
+    #    logger.info "Setting up network"
+    #    host.shell! "VBoxManage modifyvm \"#{name}\" --nic2 hostonly --hostonlyadapter2 #{config.hostonly.name}"
+    #    kvizer.info.reload
+    #  else
+    #    true
+    #  end
+    #end
 
-    def setup_nat_network
-      raise if running?
-      # use host's resolver, see http://www.virtualbox.org/manual/ch09.html#nat-adv-dns
-      # fixes url resolving when connected to VPN
-      host.shell! %(VBoxManage modifyvm "#{name}" --natdnshostresolver1 on)
-    end
+    #def setup_nat_network
+    #  raise if running?
+    #  # use host's resolver, see http://www.virtualbox.org/manual/ch09.html#nat-adv-dns
+    #  # fixes url resolving when connected to VPN
+    #  host.shell! %(VBoxManage modifyvm "#{name}" --natdnshostresolver1 on)
+    #end
 
     def setup_resources(ram_megabytes, cpus)
       raise if running?
       host.shell! "VBoxManage modifyvm \"#{name}\" --cpus #{cpus} --memory #{ram_megabytes}"
     end
 
+    # TODO - shared img if needed or maybe nfs?
     def setup_shared_folders
-      raise if running?
-      config.shared_folders.each do |name, path|
-        path = File.expand_path path, kvizer.root
-        host.shell "VBoxManage sharedfolder remove \"#{self.name}\" --name \"#{name}\""
-        host.shell! "VBoxManage sharedfolder add \"#{self.name}\" --name \"#{name}\" --hostpath \"#{path}\" " +
-                        "--automount"
-      end
+      #raise if running?
+      #config.shared_folders.each do |name, path|
+      #  path = File.expand_path path, kvizer.root
+      #  host.shell "VBoxManage sharedfolder remove \"#{self.name}\" --name \"#{name}\""
+      #  host.shell! "VBoxManage sharedfolder add \"#{self.name}\" --name \"#{name}\" --hostpath \"#{path}\" " +
+      #                  "--automount"
+      #end
     end
 
     private
 
-    def run(headless = config.headless)
+    def run
       unless running?
         setup_shared_folders
-        host.shell! "VBoxManage startvm \"#{name}\" --type #{headless ? 'headless' : 'gui' }"
+        libvirt_domain.create
       end
     end
 
@@ -318,7 +341,7 @@ class Kvizer
         shell 'root', 'service pulp-server stop'
         sleep 5
         ssh_close
-        host.shell! "VBoxManage controlvm \"#{name}\" acpipowerbutton"
+        libvirt_domain.shutdown
       end
     end
 

@@ -30,23 +30,24 @@ class Kvizer
     end
 
     def virtual_box_version
-      @virtual_box_version ||= /^[\d.]+/.match(shell!('VBoxManage --version').out)[0]
+    #  @virtual_box_version ||= /^[\d.]+/.match(shell!('VBoxManage --version').out)[0]
+      raise 'we use libvirt, whoever calls this should not do that'
     end
 
-    def setup_private_network
-      out             = shell!("VBoxManage list hostonlyifs").out
-      hostonly_config = config.hostonly
-      dhcp_config     = hostonly_config.dhcp
+    #def setup_private_network
+    #  out             = shell!("VBoxManage list hostonlyifs").out
+    #  hostonly_config = config.hostonly
+    #  dhcp_config     = hostonly_config.dhcp
 
-      return if out =~ /#{hostonly_config.name}/
-      logger.info "Creating hostonly network"
+    #  return if out =~ /#{hostonly_config.name}/
+    #  logger.info "Creating hostonly network"
 
-      shell! 'VBoxManage hostonlyif create'
-      shell! "VBoxManage hostonlyif ipconfig #{hostonly_config.name} --ip #{hostonly_config.host_ip}"
-      shell! "VBoxManage dhcpserver add --ifname #{hostonly_config.name} " +
-                 "--ip #{dhcp_config.ip} --netmask #{dhcp_config.mask} " +
-                 "--lowerip #{dhcp_config.lower_ip} --upperip #{dhcp_config.upper_ip} " +
-                 "--enable"
-    end
+    #  shell! 'VBoxManage hostonlyif create'
+    #  shell! "VBoxManage hostonlyif ipconfig #{hostonly_config.name} --ip #{hostonly_config.host_ip}"
+    #  shell! "VBoxManage dhcpserver add --ifname #{hostonly_config.name} " +
+    #             "--ip #{dhcp_config.ip} --netmask #{dhcp_config.mask} " +
+    #             "--lowerip #{dhcp_config.lower_ip} --upperip #{dhcp_config.upper_ip} " +
+    #             "--enable"
+    #end
   end
 end

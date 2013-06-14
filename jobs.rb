@@ -2,9 +2,10 @@ job 'clean-installation'
 
 job 'base' do
   offline do
-    host.setup_private_network
-    vm.setup_nat_network
-    vm.setup_private_network
+    # libvirt default setting should be enough
+    #host.setup_private_network
+    #vm.setup_nat_network
+    #vm.setup_private_network
   end
   online do
     shell! 'root', 'mkdir -p .ssh', :password => config.root_password

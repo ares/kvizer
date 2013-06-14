@@ -6,6 +6,7 @@ require 'log4r'
 require 'net/ssh'
 require 'pry'
 require 'notifier'
+require 'libvirt'
 
 lib_path = File.expand_path(File.join(File.dirname(__FILE__)))
 $: << lib_path unless $:.include? lib_path
@@ -34,13 +35,14 @@ class Kvizer
     end
   end
 
-  attr_reader :logger, :host, :logging, :config
+  attr_reader :logger, :host, :logging, :config, :libvirt
 
   def initialize(config = self.class.load_config)
     @config  = config
     @logging = Logging.new(self)
     @logger  = logging['kvizer']
     @host    = Host.new(self)
+    @libvirt = Libvirt::open("qemu:///system")
   end
 
   def vm(part_name)
