@@ -55,7 +55,7 @@ module Kvizer::CLI
                   Restore
 
   class SSH < Abstract
-    option %w[-u --user], 'LOGIN', 'User login', default: 'user'
+    option %w[-u --user], 'LOGIN', 'User login', default: 'root'
     option %w[-t --tunnel], :flag,
            'Creates SSH tunnel to a machine so you can access katello on https://localhost/katello'
 

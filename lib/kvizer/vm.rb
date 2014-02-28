@@ -146,7 +146,10 @@ class Kvizer
     end
 
     def clone_vm(name, snapshot)
-      host.shell! "virt-clone --connect=qemu:///system --original=\"#{self.name}\" --name=\"#{name}\" --auto-clone"
+      # TODO qemu user, config dir and snapshot dir configurable!
+      host.shell! "virt-clone --connect=qemu:///system --original=\"#{self.name}\" --name=\"#{name}\" --file=\"/var/lib/libvirt/images/#{name}\""
+      host.shell! "sudo chown -R qemu.qemu /etc/libvirt/qemu"
+      host.shell! "sudo chown -R qemu.qemu /var/lib/libvirt/images/"
       kvizer.info.reload
       kvizer.vms(true)
       cloned_vm = kvizer.vm name
@@ -162,8 +165,8 @@ class Kvizer
 
     def set_hostname
       raise unless running?
-      shell 'root', "hostname #{safe_name}.mydomain"
-      shell 'root', "echo 127.0.0.1 #{safe_name} #{safe_name}.mydomain >> /etc/hosts"
+      shell 'root', "hostname #{safe_name}"
+      shell 'root', "echo 127.0.0.1 #{safe_name} >> /etc/hosts"
     rescue => e
       logger.warn "hostname setting failed: #{e.message} (#{e.class})"
       e.backtrace.each { |l| logger.warn '  %s' % l }
@@ -233,6 +236,8 @@ class Kvizer
     def take_snapshot(snapshot_name)
       stop_and_wait
       parent_name = current_snapshot_name
+      run
+      wait_for :running
       libvirt_domain.snapshot_create_xml("<domainsnapshot><name>#{snapshot_name}</name><parent>#{parent_name}</parent></domainsnapshot>",
                                          16)
     end
@@ -241,7 +246,7 @@ class Kvizer
       raise ArgumentError, "No snapshot named #{snapshot_name}" unless snapshots.include?(snapshot_name)
       #power_off! if running? # I think it's not needed??
       # restore state form previous job
-      libvirt_domain.revert_to_snapshot(libvirt_domain.lookup_snapshot_by_name(snapshot_name))
+      libvirt_domain.revert_to_snapshot(libvirt_domain.lookup_snapshot_by_name(snapshot_name), 0)
       # delete child snapshots
       snapshots.reverse.each do |snapshot|
         break if snapshot == snapshot_name
@@ -278,7 +283,7 @@ class Kvizer
     def connect(user, ssh_tunnel = false)
       run_and_wait
 
-      ssh_command               = "#{'sudo ' if ssh_tunnel}ssh #{user}@#{ip}"
+      ssh_command               = "#{'sudo ' if ssh_tunnel}ssh #{user}@#{ip} -A"
       tunnel_option             = '-L 443:localhost:443'
       ignore_known_host_options = '-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
 
